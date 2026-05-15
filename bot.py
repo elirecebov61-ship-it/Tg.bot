@@ -19,6 +19,8 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 _db_lock = asyncio.Lock()
 
+DEV = "\n\n🛠 Dev. @emektas"
+
 def get_conn():
     for attempt in range(10):
         try:
@@ -69,7 +71,7 @@ def get_name(user) -> str:
 def ensure_group(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type == "private":
-            await update.message.reply_text("🚫 Bu komut sadece gruplarda çalışır!")
+            await update.message.reply_text("🚫 Bu komut sadece gruplarda çalışır!" + DEV)
             return
         return await func(update, ctx)
     return wrapper
@@ -83,13 +85,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "📌 Beni grubuna ekledikten sonra:\n"
             "• `/lock` — Medya paylaşımını kapatır\n"
             "• `/unlock` — Medya paylaşımını açar\n\n"
-            "⚠️ Bu komutları sadece yetkili kişiler kullanabilir.",
+            "⚠️ Bu komutları sadece yetkili kişiler kullanabilir."
+            + DEV,
             parse_mode="Markdown"
         )
     else:
         await update.message.reply_text(
             "👋 Merhaba! Medya kilit botu aktif.\n"
-            "Yetkili kişiler `/lock` ve `/unlock` komutlarını kullanabilir.",
+            "Yetkili kişiler `/lock` ve `/unlock` komutlarını kullanabilir."
+            + DEV,
             parse_mode="Markdown"
         )
 
@@ -97,10 +101,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if update.effective_user.id != FOUNDER_ID:
-        await msg.reply_text("🚫 Yetkin yok")
+        await msg.reply_text("🚫 Yetkin yok" + DEV)
         return
     if not msg.reply_to_message:
-        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/pro` yaz.", parse_mode="Markdown")
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/pro` yaz." + DEV, parse_mode="Markdown")
         return
     target      = msg.reply_to_message.from_user
     cid         = str(update.effective_chat.id)
@@ -118,7 +122,7 @@ async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         finally:
             conn.close()
     await msg.reply_text(
-        f"✅ *{target_name}* bu grupta `/lock` ve `/unlock` yetkisi aldı!",
+        f"✅ *{target_name}* bu grupta `/lock` ve `/unlock` yetkisi aldı!" + DEV,
         parse_mode="Markdown"
     )
 
@@ -126,10 +130,10 @@ async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if update.effective_user.id != FOUNDER_ID:
-        await msg.reply_text("🚫 Yetkin yok")
+        await msg.reply_text("🚫 Yetkin yok" + DEV)
         return
     if not msg.reply_to_message:
-        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unpro` yaz.", parse_mode="Markdown")
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unpro` yaz." + DEV, parse_mode="Markdown")
         return
     target      = msg.reply_to_message.from_user
     cid         = str(update.effective_chat.id)
@@ -147,7 +151,7 @@ async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         finally:
             conn.close()
     await msg.reply_text(
-        f"❌ *{target_name}* yetkisi alındı.",
+        f"❌ *{target_name}* yetkisi alındı." + DEV,
         parse_mode="Markdown"
     )
 
@@ -161,7 +165,7 @@ async def cmd_lock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
-                    await msg.reply_text("🚫 Yetkin yok")
+                    await msg.reply_text("🚫 Yetkin yok" + DEV)
                     return
                 cur.execute(
                     "INSERT INTO locked_chats (chat_id) VALUES (%s) ON CONFLICT DO NOTHING",
@@ -170,7 +174,7 @@ async def cmd_lock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             conn.commit()
         finally:
             conn.close()
-    await msg.reply_text("✅ Medya kapandı")
+    await msg.reply_text("✅ Medya kapandı" + DEV)
 
 @ensure_group
 async def cmd_unlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -182,7 +186,7 @@ async def cmd_unlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
-                    await msg.reply_text("🚫 Yetkin yok")
+                    await msg.reply_text("🚫 Yetkin yok" + DEV)
                     return
                 cur.execute(
                     "DELETE FROM locked_chats WHERE chat_id=%s",
@@ -191,7 +195,7 @@ async def cmd_unlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             conn.commit()
         finally:
             conn.close()
-    await msg.reply_text("✅ Medya açıldı")
+    await msg.reply_text("✅ Medya açıldı" + DEV)
 
 async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.type == "private":
