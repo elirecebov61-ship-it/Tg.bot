@@ -45,6 +45,11 @@ def init_db():
             CREATE TABLE IF NOT EXISTS locked_chats (
                 chat_id TEXT PRIMARY KEY
             );
+            CREATE TABLE IF NOT EXISTS exempt_users (
+                chat_id TEXT NOT NULL,
+                user_id TEXT NOT NULL,
+                PRIMARY KEY (chat_id, user_id)
+            );
         """)
         conn.commit()
         cur.close()
@@ -60,6 +65,13 @@ def is_pro(cur, chat_id, user_id):
 
 def is_locked(cur, chat_id):
     cur.execute("SELECT 1 FROM locked_chats WHERE chat_id=%s", (str(chat_id),))
+    return cur.fetchone() is not None
+
+def is_exempt(cur, chat_id, user_id):
+    cur.execute(
+        "SELECT 1 FROM exempt_users WHERE chat_id=%s AND user_id=%s",
+        (str(chat_id), str(user_id))
+    )
     return cur.fetchone() is not None
 
 def get_name(user) -> str:
@@ -84,7 +96,9 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "Beni grubuna ekle ve medyaları kontrol et!\n\n"
             "📌 Beni grubuna ekledikten sonra:\n"
             "• `/lock` — Medya paylaşımını kapatır\n"
-            "• `/unlock` — Medya paylaşımını açar\n\n"
+            "• `/unlock` — Medya paylaşımını açar\n"
+            "• `/exempt` — Kişiyi istisnaya ekler\n"
+            "• `/unexempt` — Kişiyi istisnadan çıkarır\n\n"
             "⚠️ Bu komutları sadece yetkili kişiler kullanabilir."
             + DEV,
             parse_mode="Markdown"
@@ -156,6 +170,78 @@ async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 @ensure_group
+async def cmd_exempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
+    async with _db_lock:
+        conn = get_conn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
+                    await msg.reply_text("🚫 Yetkin yok" + DEV)
+                    return
+        finally:
+            conn.close()
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/exempt` yaz." + DEV, parse_mode="Markdown")
+        return
+    target      = msg.reply_to_message.from_user
+    tid         = str(target.id)
+    target_name = get_name(target)
+    async with _db_lock:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO exempt_users (chat_id, user_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
+                    (cid, tid)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    await msg.reply_text(
+        f"✅ *{target_name}* istisna listesine eklendi. Medyaları silinmeyecek!" + DEV,
+        parse_mode="Markdown"
+    )
+
+@ensure_group
+async def cmd_unexempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
+    async with _db_lock:
+        conn = get_conn()
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
+                    await msg.reply_text("🚫 Yetkin yok" + DEV)
+                    return
+        finally:
+            conn.close()
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unexempt` yaz." + DEV, parse_mode="Markdown")
+        return
+    target      = msg.reply_to_message.from_user
+    tid         = str(target.id)
+    target_name = get_name(target)
+    async with _db_lock:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "DELETE FROM exempt_users WHERE chat_id=%s AND user_id=%s",
+                    (cid, tid)
+                )
+            conn.commit()
+        finally:
+            conn.close()
+    await msg.reply_text(
+        f"❌ *{target_name}* istisna listesinden çıkarıldı." + DEV,
+        parse_mode="Markdown"
+    )
+
+@ensure_group
 async def cmd_lock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     uid = update.effective_user.id
@@ -201,14 +287,16 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.type == "private":
         return
     cid = str(update.effective_chat.id)
+    uid = str(update.effective_user.id)
     async with _db_lock:
         conn = get_conn()
         try:
             with conn.cursor() as cur:
-                locked = is_locked(cur, cid)
+                locked  = is_locked(cur, cid)
+                exempted = is_exempt(cur, cid, uid)
         finally:
             conn.close()
-    if locked:
+    if locked and not exempted:
         try:
             await update.message.delete()
         except Exception as e:
@@ -217,21 +305,25 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     init_db()
     commands = [
-        BotCommand("start",  "Botu başlat"),
-        BotCommand("lock",   "Medya paylaşımını kapat"),
-        BotCommand("unlock", "Medya paylaşımını aç"),
-        BotCommand("pro",    "Kullanıcıya yetki ver"),
-        BotCommand("unpro",  "Kullanıcının yetkisini al"),
+        BotCommand("start",    "Botu başlat"),
+        BotCommand("lock",     "Medya paylaşımını kapat"),
+        BotCommand("unlock",   "Medya paylaşımını aç"),
+        BotCommand("pro",      "Kullanıcıya yetki ver"),
+        BotCommand("unpro",    "Kullanıcının yetkisini al"),
+        BotCommand("exempt",   "Kişiyi istisnaya ekle"),
+        BotCommand("unexempt", "Kişiyi istisnadan çıkar"),
     ]
     await app.bot.set_my_commands(commands)
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
-    app.add_handler(CommandHandler("start",  cmd_start))
-    app.add_handler(CommandHandler("pro",    cmd_pro))
-    app.add_handler(CommandHandler("unpro",  cmd_unpro))
-    app.add_handler(CommandHandler("lock",   cmd_lock))
-    app.add_handler(CommandHandler("unlock", cmd_unlock))
+    app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("pro",      cmd_pro))
+    app.add_handler(CommandHandler("unpro",    cmd_unpro))
+    app.add_handler(CommandHandler("lock",     cmd_lock))
+    app.add_handler(CommandHandler("unlock",   cmd_unlock))
+    app.add_handler(CommandHandler("exempt",   cmd_exempt))
+    app.add_handler(CommandHandler("unexempt", cmd_unexempt))
 
     media_filter = (
         filters.PHOTO |
