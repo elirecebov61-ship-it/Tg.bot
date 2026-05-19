@@ -2,7 +2,7 @@ import logging
 import os
 import asyncio
 import time
-import psycopg2
+from psycopg2 import pool
 import psycopg2.extras
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -17,62 +17,105 @@ TOKEN        = os.environ["BOT_TOKEN"]
 FOUNDER_ID   = 8034872992
 DATABASE_URL = os.environ["DATABASE_URL"]
 
-_db_lock = asyncio.Lock()
-
 DEV = "\n\n🛠 Dev. @emektas"
 
+cache_locked  = set()
+cache_exempt  = set()
+cache_pro     = set()
+cache_ready   = False
+
+# Adları saxlamaq üçün
+cache_pro_names    = {}   # (chat_id, user_id) -> name
+cache_exempt_names = {}   # (chat_id, user_id) -> name
+
+db_pool = None
+
+def get_pool():
+    global db_pool
+    if db_pool is None:
+        for attempt in range(10):
+            try:
+                db_pool = pool.ThreadedConnectionPool(2, 10, DATABASE_URL)
+                return db_pool
+            except Exception as e:
+                print(f"Pool hatası ({attempt+1}/10): {e}")
+                time.sleep(3)
+        raise Exception("DB pool oluşturulamadı!")
+    return db_pool
+
+from contextlib import contextmanager
+
+@contextmanager
 def get_conn():
-    for attempt in range(10):
-        try:
-            conn = psycopg2.connect(DATABASE_URL)
-            conn.autocommit = False
-            return conn
-        except Exception as e:
-            print(f"DB bağlantı xətası (cəhd {attempt+1}/10): {e}")
-            time.sleep(3)
-    raise Exception("DB-yə qoşulmaq mümkün olmadı!")
+    p = get_pool()
+    conn = p.getconn()
+    try:
+        conn.autocommit = False
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        p.putconn(conn)
 
 def init_db():
-    conn = get_conn()
-    try:
-        cur = conn.cursor()
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS pro_users (
-                chat_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                PRIMARY KEY (chat_id, user_id)
-            );
-            CREATE TABLE IF NOT EXISTS locked_chats (
-                chat_id TEXT PRIMARY KEY
-            );
-            CREATE TABLE IF NOT EXISTS exempt_users (
-                chat_id TEXT NOT NULL,
-                user_id TEXT NOT NULL,
-                PRIMARY KEY (chat_id, user_id)
-            );
-        """)
-        conn.commit()
-        cur.close()
-    finally:
-        conn.close()
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS pro_users (
+                    chat_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    name    TEXT,
+                    PRIMARY KEY (chat_id, user_id)
+                );
+                CREATE TABLE IF NOT EXISTS locked_chats (
+                    chat_id TEXT PRIMARY KEY
+                );
+                CREATE TABLE IF NOT EXISTS exempt_users (
+                    chat_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    name    TEXT,
+                    PRIMARY KEY (chat_id, user_id)
+                );
+            """)
+            # Eski tablolara name kolonu ekle (zaten varsa hata vermez)
+            try:
+                cur.execute("ALTER TABLE pro_users ADD COLUMN IF NOT EXISTS name TEXT;")
+                cur.execute("ALTER TABLE exempt_users ADD COLUMN IF NOT EXISTS name TEXT;")
+            except Exception:
+                pass
 
-def is_pro(cur, chat_id, user_id):
-    cur.execute(
-        "SELECT 1 FROM pro_users WHERE chat_id=%s AND user_id=%s",
-        (str(chat_id), str(user_id))
-    )
-    return cur.fetchone() is not None
+def load_cache():
+    global cache_locked, cache_exempt, cache_pro, cache_ready
+    global cache_pro_names, cache_exempt_names
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT chat_id FROM locked_chats")
+            cache_locked = {r[0] for r in cur.fetchall()}
 
-def is_locked(cur, chat_id):
-    cur.execute("SELECT 1 FROM locked_chats WHERE chat_id=%s", (str(chat_id),))
-    return cur.fetchone() is not None
+            cur.execute("SELECT chat_id, user_id, name FROM exempt_users")
+            rows = cur.fetchall()
+            cache_exempt = {(r[0], r[1]) for r in rows}
+            cache_exempt_names = {(r[0], r[1]): r[2] or r[1] for r in rows}
 
-def is_exempt(cur, chat_id, user_id):
-    cur.execute(
-        "SELECT 1 FROM exempt_users WHERE chat_id=%s AND user_id=%s",
-        (str(chat_id), str(user_id))
-    )
-    return cur.fetchone() is not None
+            cur.execute("SELECT chat_id, user_id, name FROM pro_users")
+            rows = cur.fetchall()
+            cache_pro = {(r[0], r[1]) for r in rows}
+            cache_pro_names = {(r[0], r[1]): r[2] or r[1] for r in rows}
+
+    cache_ready = True
+    print(f"Cache yüklendi: {len(cache_locked)} kilit, "
+          f"{len(cache_exempt)} istisna, {len(cache_pro)} pro")
+
+def c_is_locked(chat_id):
+    return str(chat_id) in cache_locked
+
+def c_is_exempt(chat_id, user_id):
+    return (str(chat_id), str(user_id)) in cache_exempt
+
+def c_is_pro(chat_id, user_id):
+    return (str(chat_id), str(user_id)) in cache_pro
 
 def get_name(user) -> str:
     name = user.first_name or ""
@@ -94,20 +137,19 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "👋 Merhaba!\n\n"
             "🔒 Ben bir *medya kilit botuyum*.\n"
             "Beni grubuna ekle ve medyaları kontrol et!\n\n"
-            "📌 Beni grubuna ekledikten sonra:\n"
+            "📌 Komutlar:\n"
             "• `/lock` — Medya paylaşımını kapatır\n"
             "• `/unlock` — Medya paylaşımını açar\n"
             "• `/exempt` — Kişiyi istisnaya ekler\n"
-            "• `/unexempt` — Kişiyi istisnadan çıkarır\n\n"
-            "⚠️ Bu komutları sadece yetkili kişiler kullanabilir."
-            + DEV,
+            "• `/unexempt` — Kişiyi istisnadan çıkarır\n"
+            "• `/list` — Yetkililer ve istisnalar listesi\n\n"
+            "⚠️ Komutları sadece yetkili kişiler kullanabilir." + DEV,
             parse_mode="Markdown"
         )
     else:
         await update.message.reply_text(
-            "👋 Merhaba! Medya kilit botu aktif.\n"
-            "Yetkili kişiler `/lock` ve `/unlock` komutlarını kullanabilir."
-            + DEV,
+            "👋 Medya kilit botu aktif.\n"
+            "Yetkili kişiler `/lock` ve `/unlock` kullanabilir." + DEV,
             parse_mode="Markdown"
         )
 
@@ -115,196 +157,180 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if update.effective_user.id != FOUNDER_ID:
-        await msg.reply_text("🚫 Yetkin yok" + DEV)
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
     if not msg.reply_to_message:
         await msg.reply_text("❗ Kullanım: Birine yanıt verip `/pro` yaz." + DEV, parse_mode="Markdown")
         return
-    target      = msg.reply_to_message.from_user
-    cid         = str(update.effective_chat.id)
-    tid         = str(target.id)
-    target_name = get_name(target)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO pro_users (chat_id, user_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-                    (cid, tid)
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    await msg.reply_text(
-        f"✅ *{target_name}* bu grupta `/lock` ve `/unlock` yetkisi aldı!" + DEV,
-        parse_mode="Markdown"
-    )
+    target = msg.reply_to_message.from_user
+    cid, tid = str(update.effective_chat.id), str(target.id)
+    name = get_name(target)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO pro_users (chat_id, user_id, name) VALUES (%s,%s,%s) ON CONFLICT (chat_id, user_id) DO UPDATE SET name=%s",
+                (cid, tid, name, name)
+            )
+    cache_pro.add((cid, tid))
+    cache_pro_names[(cid, tid)] = name
+    await msg.reply_text(f"✅ *{name}* yetki aldı!" + DEV, parse_mode="Markdown")
 
 @ensure_group
 async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if update.effective_user.id != FOUNDER_ID:
-        await msg.reply_text("🚫 Yetkin yok" + DEV)
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
     if not msg.reply_to_message:
         await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unpro` yaz." + DEV, parse_mode="Markdown")
         return
-    target      = msg.reply_to_message.from_user
-    cid         = str(update.effective_chat.id)
-    tid         = str(target.id)
-    target_name = get_name(target)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM pro_users WHERE chat_id=%s AND user_id=%s",
-                    (cid, tid)
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    await msg.reply_text(
-        f"❌ *{target_name}* yetkisi alındı." + DEV,
-        parse_mode="Markdown"
-    )
+    target = msg.reply_to_message.from_user
+    cid, tid = str(update.effective_chat.id), str(target.id)
+    name = get_name(target)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM pro_users WHERE chat_id=%s AND user_id=%s", (cid, tid))
+    cache_pro.discard((cid, tid))
+    cache_pro_names.pop((cid, tid), None)
+    await msg.reply_text(f"❌ *{name}* yetkisi alındı." + DEV, parse_mode="Markdown")
 
 @ensure_group
 async def cmd_exempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     uid = update.effective_user.id
     cid = str(update.effective_chat.id)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
-                    await msg.reply_text("🚫 Yetkin yok" + DEV)
-                    return
-        finally:
-            conn.close()
+    if uid != FOUNDER_ID and not c_is_pro(cid, uid):
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
     if not msg.reply_to_message:
         await msg.reply_text("❗ Kullanım: Birine yanıt verip `/exempt` yaz." + DEV, parse_mode="Markdown")
         return
-    target      = msg.reply_to_message.from_user
-    tid         = str(target.id)
-    target_name = get_name(target)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO exempt_users (chat_id, user_id) VALUES (%s,%s) ON CONFLICT DO NOTHING",
-                    (cid, tid)
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    await msg.reply_text(
-        f"✅ *{target_name}* istisna listesine eklendi. Medyaları silinmeyecek!" + DEV,
-        parse_mode="Markdown"
-    )
+    target = msg.reply_to_message.from_user
+    tid = str(target.id)
+    name = get_name(target)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO exempt_users (chat_id, user_id, name) VALUES (%s,%s,%s) ON CONFLICT (chat_id, user_id) DO UPDATE SET name=%s",
+                (cid, tid, name, name)
+            )
+    cache_exempt.add((cid, tid))
+    cache_exempt_names[(cid, tid)] = name
+    await msg.reply_text(f"✅ *{name}* istisna listesine eklendi!" + DEV, parse_mode="Markdown")
 
 @ensure_group
 async def cmd_unexempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     uid = update.effective_user.id
     cid = str(update.effective_chat.id)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
-                    await msg.reply_text("🚫 Yetkin yok" + DEV)
-                    return
-        finally:
-            conn.close()
+    if uid != FOUNDER_ID and not c_is_pro(cid, uid):
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
     if not msg.reply_to_message:
         await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unexempt` yaz." + DEV, parse_mode="Markdown")
         return
-    target      = msg.reply_to_message.from_user
-    tid         = str(target.id)
-    target_name = get_name(target)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "DELETE FROM exempt_users WHERE chat_id=%s AND user_id=%s",
-                    (cid, tid)
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    await msg.reply_text(
-        f"❌ *{target_name}* istisna listesinden çıkarıldı." + DEV,
-        parse_mode="Markdown"
-    )
+    target = msg.reply_to_message.from_user
+    tid = str(target.id)
+    name = get_name(target)
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM exempt_users WHERE chat_id=%s AND user_id=%s", (cid, tid))
+    cache_exempt.discard((cid, tid))
+    cache_exempt_names.pop((cid, tid), None)
+    await msg.reply_text(f"❌ *{name}* istisna listesinden çıkarıldı." + DEV, parse_mode="Markdown")
 
 @ensure_group
 async def cmd_lock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     uid = update.effective_user.id
     cid = str(update.effective_chat.id)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
-                    await msg.reply_text("🚫 Yetkin yok" + DEV)
-                    return
-                cur.execute(
-                    "INSERT INTO locked_chats (chat_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    (cid,)
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    await msg.reply_text("✅ Medya kapandı" + DEV)
+    if uid != FOUNDER_ID and not c_is_pro(cid, uid):
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO locked_chats (chat_id) VALUES (%s) ON CONFLICT DO NOTHING", (cid,)
+            )
+    cache_locked.add(cid)
+    await msg.reply_text("✅ Medya paylaşımı kapatıldı!" + DEV)
 
 @ensure_group
 async def cmd_unlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     uid = update.effective_user.id
     cid = str(update.effective_chat.id)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-                if uid != FOUNDER_ID and not is_pro(cur, cid, uid):
-                    await msg.reply_text("🚫 Yetkin yok" + DEV)
-                    return
-                cur.execute(
-                    "DELETE FROM locked_chats WHERE chat_id=%s",
-                    (cid,)
-                )
-            conn.commit()
-        finally:
-            conn.close()
-    await msg.reply_text("✅ Medya açıldı" + DEV)
+    if uid != FOUNDER_ID and not c_is_pro(cid, uid):
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("DELETE FROM locked_chats WHERE chat_id=%s", (cid,))
+    cache_locked.discard(cid)
+    await msg.reply_text("✅ Medya paylaşımı açıldı!" + DEV)
+
+@ensure_group
+async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if update.effective_user.id != FOUNDER_ID:
+        await msg.reply_text("🚫 Bu komutu sadece kurucu kullanabilir!" + DEV)
+        return
+    cid = str(update.effective_chat.id)
+
+    # Pro listesi
+    pro_list = [
+        (uid, cache_pro_names.get((cid, uid), uid))
+        for (c, uid) in cache_pro if c == cid
+    ]
+
+    # İstisna listesi
+    exempt_list = [
+        (uid, cache_exempt_names.get((cid, uid), uid))
+        for (c, uid) in cache_exempt if c == cid
+    ]
+
+    # Kilit durumu
+    durum = "🔒 Kapalı" if c_is_locked(cid) else "🔓 Açık"
+
+    text = f"📋 *Grup Listesi*\n"
+    text += f"━━━━━━━━━━━━━━━\n"
+    text += f"📡 Medya Durumu: {durum}\n\n"
+
+    text += f"👑 *Yetkili Kullanıcılar* ({len(pro_list)} kişi)\n"
+    if pro_list:
+        for uid, name in pro_list:
+            text += f"  • {name} — `{uid}`\n"
+    else:
+        text += "  _Henüz kimse yok_\n"
+
+    text += f"\n🛡 *İstisna Listesi* ({len(exempt_list)} kişi)\n"
+    if exempt_list:
+        for uid, name in exempt_list:
+            text += f"  • {name} — `{uid}`\n"
+    else:
+        text += "  _Henüz kimse yok_\n"
+
+    text += DEV
+
+    await msg.reply_text(text, parse_mode="Markdown")
 
 async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or update.effective_chat.type == "private":
         return
+    if not cache_ready:
+        return
     cid = str(update.effective_chat.id)
     uid = str(update.effective_user.id)
-    async with _db_lock:
-        conn = get_conn()
-        try:
-            with conn.cursor() as cur:
-                locked  = is_locked(cur, cid)
-                exempted = is_exempt(cur, cid, uid)
-        finally:
-            conn.close()
-    if locked and not exempted:
+    if c_is_locked(cid) and not c_is_exempt(cid, uid):
         try:
             await update.message.delete()
         except Exception as e:
-            logger.warning(f"Medya silinemedi: {e}")
+            logger.warning(f"Silme hatası: {e}")
 
 async def post_init(app: Application):
     init_db()
-    commands = [
+    load_cache()
+    await app.bot.set_my_commands([
         BotCommand("start",    "Botu başlat"),
         BotCommand("lock",     "Medya paylaşımını kapat"),
         BotCommand("unlock",   "Medya paylaşımını aç"),
@@ -312,8 +338,8 @@ async def post_init(app: Application):
         BotCommand("unpro",    "Kullanıcının yetkisini al"),
         BotCommand("exempt",   "Kişiyi istisnaya ekle"),
         BotCommand("unexempt", "Kişiyi istisnadan çıkar"),
-    ]
-    await app.bot.set_my_commands(commands)
+        BotCommand("list",     "Yetkililer ve istisnalar listesi"),
+    ])
 
 def main():
     app = Application.builder().token(TOKEN).post_init(post_init).build()
@@ -324,16 +350,12 @@ def main():
     app.add_handler(CommandHandler("unlock",   cmd_unlock))
     app.add_handler(CommandHandler("exempt",   cmd_exempt))
     app.add_handler(CommandHandler("unexempt", cmd_unexempt))
+    app.add_handler(CommandHandler("list",     cmd_list))
 
     media_filter = (
-        filters.PHOTO |
-        filters.VIDEO |
-        filters.Document.ALL |
-        filters.AUDIO |
-        filters.VOICE |
-        filters.VIDEO_NOTE |
-        filters.Sticker.ALL |
-        filters.ANIMATION
+        filters.PHOTO | filters.VIDEO | filters.Document.ALL |
+        filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE |
+        filters.Sticker.ALL | filters.ANIMATION
     )
     app.add_handler(MessageHandler(media_filter, delete_media))
 
