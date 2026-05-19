@@ -24,9 +24,8 @@ cache_exempt  = set()
 cache_pro     = set()
 cache_ready   = False
 
-# Adları saxlamaq üçün
-cache_pro_names    = {}   # (chat_id, user_id) -> name
-cache_exempt_names = {}   # (chat_id, user_id) -> name
+cache_pro_names    = {}
+cache_exempt_names = {}
 
 db_pool = None
 
@@ -79,7 +78,6 @@ def init_db():
                     PRIMARY KEY (chat_id, user_id)
                 );
             """)
-            # Eski tablolara name kolonu ekle (zaten varsa hata vermez)
             try:
                 cur.execute("ALTER TABLE pro_users ADD COLUMN IF NOT EXISTS name TEXT;")
                 cur.execute("ALTER TABLE exempt_users ADD COLUMN IF NOT EXISTS name TEXT;")
@@ -277,19 +275,16 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     cid = str(update.effective_chat.id)
 
-    # Pro listesi
     pro_list = [
-        (uid, cache_pro_names.get((cid, uid), uid))
+        cache_pro_names.get((cid, uid), uid)
         for (c, uid) in cache_pro if c == cid
     ]
 
-    # İstisna listesi
     exempt_list = [
-        (uid, cache_exempt_names.get((cid, uid), uid))
+        cache_exempt_names.get((cid, uid), uid)
         for (c, uid) in cache_exempt if c == cid
     ]
 
-    # Kilit durumu
     durum = "🔒 Kapalı" if c_is_locked(cid) else "🔓 Açık"
 
     text = f"📋 *Grup Listesi*\n"
@@ -298,20 +293,19 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text += f"👑 *Yetkili Kullanıcılar* ({len(pro_list)} kişi)\n"
     if pro_list:
-        for uid, name in pro_list:
-            text += f"  • {name} — `{uid}`\n"
+        for name in pro_list:
+            text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
 
     text += f"\n🛡 *İstisna Listesi* ({len(exempt_list)} kişi)\n"
     if exempt_list:
-        for uid, name in exempt_list:
-            text += f"  • {name} — `{uid}`\n"
+        for name in exempt_list:
+            text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
 
     text += DEV
-
     await msg.reply_text(text, parse_mode="Markdown")
 
 async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
