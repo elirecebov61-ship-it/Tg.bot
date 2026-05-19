@@ -1,9 +1,7 @@
 import logging
 import os
-import asyncio
 import time
 from psycopg2 import pool
-import psycopg2.extras
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -19,11 +17,10 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 
 DEV = "\n\n🛠 Dev. @emektas"
 
-cache_locked  = set()
-cache_exempt  = set()
-cache_pro     = set()
-cache_ready   = False
-
+cache_locked       = set()
+cache_exempt       = set()
+cache_pro          = set()
+cache_ready        = False
 cache_pro_names    = {}
 cache_exempt_names = {}
 
@@ -95,12 +92,12 @@ def load_cache():
             cur.execute("SELECT chat_id, user_id, name FROM exempt_users")
             rows = cur.fetchall()
             cache_exempt = {(r[0], r[1]) for r in rows}
-            cache_exempt_names = {(r[0], r[1]): r[2] or r[1] for r in rows}
+            cache_exempt_names = {(r[0], r[1]): r[2] if r[2] else f"ID: {r[1]}" for r in rows}
 
             cur.execute("SELECT chat_id, user_id, name FROM pro_users")
             rows = cur.fetchall()
             cache_pro = {(r[0], r[1]) for r in rows}
-            cache_pro_names = {(r[0], r[1]): r[2] or r[1] for r in rows}
+            cache_pro_names = {(r[0], r[1]): r[2] if r[2] else f"ID: {r[1]}" for r in rows}
 
     cache_ready = True
     print(f"Cache yüklendi: {len(cache_locked)} kilit, "
@@ -276,19 +273,18 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cid = str(update.effective_chat.id)
 
     pro_list = [
-        cache_pro_names.get((cid, uid), uid)
+        cache_pro_names.get((cid, uid), f"ID: {uid}")
         for (c, uid) in cache_pro if c == cid
     ]
-
     exempt_list = [
-        cache_exempt_names.get((cid, uid), uid)
+        cache_exempt_names.get((cid, uid), f"ID: {uid}")
         for (c, uid) in cache_exempt if c == cid
     ]
 
     durum = "🔒 Kapalı" if c_is_locked(cid) else "🔓 Açık"
 
-    text = f"📋 *Grup Listesi*\n"
-    text += f"━━━━━━━━━━━━━━━\n"
+    text  = "📋 *Grup Listesi*\n"
+    text += "━━━━━━━━━━━━━━━\n"
     text += f"📡 Medya Durumu: {durum}\n\n"
 
     text += f"👑 *Yetkili Kullanıcılar* ({len(pro_list)} kişi)\n"
@@ -324,6 +320,38 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(app: Application):
     init_db()
     load_cache()
+
+    # DB-deki köhnə yazıların adlarını Telegram-dan çək
+    for (cid, uid) in list(cache_pro):
+        if not cache_pro_names.get((cid, uid)) or cache_pro_names[(cid, uid)] == f"ID: {uid}":
+            try:
+                member = await app.bot.get_chat_member(int(cid), int(uid))
+                name = get_name(member.user)
+                cache_pro_names[(cid, uid)] = name
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE pro_users SET name=%s WHERE chat_id=%s AND user_id=%s",
+                            (name, cid, uid)
+                        )
+            except Exception:
+                pass
+
+    for (cid, uid) in list(cache_exempt):
+        if not cache_exempt_names.get((cid, uid)) or cache_exempt_names[(cid, uid)] == f"ID: {uid}":
+            try:
+                member = await app.bot.get_chat_member(int(cid), int(uid))
+                name = get_name(member.user)
+                cache_exempt_names[(cid, uid)] = name
+                with get_conn() as conn:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE exempt_users SET name=%s WHERE chat_id=%s AND user_id=%s",
+                            (name, cid, uid)
+                        )
+            except Exception:
+                pass
+
     await app.bot.set_my_commands([
         BotCommand("start",    "Botu başlat"),
         BotCommand("lock",     "Medya paylaşımını kapat"),
