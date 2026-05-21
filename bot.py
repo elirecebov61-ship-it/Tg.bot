@@ -1,4 +1,3 @@
-
 import logging
 import os
 import time
@@ -331,8 +330,12 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await msg.reply_text(text, parse_mode="Markdown")
 
 async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not update.message or update.effective_chat.type == "private":
+    if not update.message:
         return
+
+    if update.effective_chat.type == "private":
+        return
+
     if not cache_ready:
         return
 
@@ -341,18 +344,23 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not c_is_locked(cid):
         return
 
-    user = update.effective_user
+    msg = update.message
+    uid = None
 
-    # Bot mesajını silmə — botlar da silinəcək (is_bot yoxlaması yoxdur)
-    # Yalnız istisnadakılar silinmir
-    if user is not None:
-        uid = str(user.id)
-        # İstisnadakı istifadəçiləri keç
-        if c_is_exempt(cid, uid):
-            return
+    # Normal istifadəçi və ya bot
+    if msg.from_user:
+        uid = str(msg.from_user.id)
 
-    # Hamısını sırasına əlavə et — bot da, istifadəçi də
-    queue_delete(update.message)
+    # Anonim admin / sender_chat (kanaldan göndərilən mesajlar)
+    elif msg.sender_chat:
+        uid = f"chat_{msg.sender_chat.id}"
+
+    # İstisna yoxlaması
+    if uid and c_is_exempt(cid, uid):
+        return
+
+    # Sil
+    queue_delete(msg)
 
 async def post_init(app: Application):
     global _delete_queue
@@ -416,9 +424,17 @@ def main():
     app.add_handler(CommandHandler("list",     cmd_list))
 
     media_filter = (
-        filters.PHOTO | filters.VIDEO | filters.Document.ALL |
-        filters.AUDIO | filters.VOICE | filters.VIDEO_NOTE |
-        filters.Sticker.ALL | filters.ANIMATION
+        filters.ALL
+        & (
+            filters.PHOTO
+            | filters.VIDEO
+            | filters.Document.ALL
+            | filters.AUDIO
+            | filters.VOICE
+            | filters.VIDEO_NOTE
+            | filters.Sticker.ALL
+            | filters.ANIMATION
+        )
     )
     app.add_handler(MessageHandler(media_filter, delete_media))
 
