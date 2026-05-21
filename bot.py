@@ -136,20 +136,15 @@ pyro = Client(
     session_string=STRING_SESSION
 )
 
-media_filter = (
-    pyro_filters.photo
-    | pyro_filters.video
-    | pyro_filters.document
-    | pyro_filters.audio
-    | pyro_filters.voice
-    | pyro_filters.video_note
-    | pyro_filters.sticker
-    | pyro_filters.animation
-)
-
-@pyro.on_message(pyro_filters.group & media_filter)
+@pyro.on_message(pyro_filters.group)
 async def delete_media(client: Client, message: PyroMessage):
     if not cache_ready:
+        return
+
+    # Mesajın media olub olmadığını yoxlayırıq (botlardan gələnlər də daxil)
+    if not (message.media or message.photo or message.video or message.document or 
+            message.audio or message.voice or message.video_note or message.sticker or 
+            message.animation):
         return
 
     cid = str(message.chat.id)
@@ -163,6 +158,7 @@ async def delete_media(client: Client, message: PyroMessage):
     elif message.sender_chat:
         uid = f"chat_{message.sender_chat.id}"
 
+    # İstisna siyahısında olanları silmir
     if uid and c_is_exempt(cid, uid):
         return
 
@@ -348,7 +344,6 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text += DEV
     await update.message.reply_text(text, parse_mode="Markdown")
 
-# ── post_init ─────────────────────────────────────────────────────────────
 async def post_init(tg_app: Application):
     init_db()
     load_cache()
@@ -363,29 +358,24 @@ async def post_init(tg_app: Application):
         BotCommand("list",     "Yetkililer ve istisnalar listesi"),
     ])
 
-# ── Başlat — hər ikisi eyni vaxtda işləsin ───────────────────────────────
 async def main():
-    # Telegram bot
     tg_app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
     tg_app.add_handler(CommandHandler("start",    cmd_start))
     tg_app.add_handler(CommandHandler("lock",     cmd_lock))
     tg_app.add_handler(CommandHandler("unlock",   cmd_unlock))
     tg_app.add_handler(CommandHandler("pro",      cmd_pro))
-    tg_app.add_handler(CommandHandler("unpro",    cmd_unpro))
+    tg_app.add_handler(CommandHandler("unpro",   cmd_unpro))
     tg_app.add_handler(CommandHandler("exempt",   cmd_exempt))
     tg_app.add_handler(CommandHandler("unexempt", cmd_unexempt))
     tg_app.add_handler(CommandHandler("list",     cmd_list))
 
-    # Hər ikisini eyni vaxtda başlat
     await tg_app.initialize()
     await tg_app.start()
     await tg_app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
     await pyro.start()
-
     print("Bot başladı!")
 
-    # Dayanmadan işlə
     try:
         await asyncio.Event().wait()
     finally:
@@ -396,3 +386,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
