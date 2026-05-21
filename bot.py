@@ -1,10 +1,16 @@
 import logging
 import os
 import time
+import asyncio
 from contextlib import contextmanager
 from psycopg2 import pool
-from pyrogram import Client, filters
-from pyrogram.types import Message
+from pyrogram import Client, filters as pyro_filters
+from pyrogram.types import Message as PyroMessage
+from telegram import Update, BotCommand
+from telegram.ext import (
+    Application, CommandHandler,
+    ContextTypes
+)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -12,9 +18,9 @@ logger = logging.getLogger(__name__)
 API_ID         = int(os.environ["API_ID"])
 API_HASH       = os.environ["API_HASH"]
 STRING_SESSION = os.environ["STRING_SESSION"]
+BOT_TOKEN      = os.environ["BOT_TOKEN"]
 FOUNDER_ID     = 8034872992
-
-DATABASE_URL = os.environ["DATABASE_URL"]
+DATABASE_URL   = os.environ["DATABASE_URL"]
 
 DEV = "\n\n🛠 Dev. @emektas"
 
@@ -122,29 +128,27 @@ def get_name(user) -> str:
         name += " " + user.last_name
     return name.strip() or user.username or str(user.id)
 
-# ── Pyrogram client ───────────────────────────────────────────────────────
-app = Client(
+# ── Pyrogram — silmə üçün ─────────────────────────────────────────────────
+pyro = Client(
     "media_guard",
     api_id=API_ID,
     api_hash=API_HASH,
     session_string=STRING_SESSION
 )
 
-# ── Medya filter ──────────────────────────────────────────────────────────
 media_filter = (
-    filters.photo
-    | filters.video
-    | filters.document
-    | filters.audio
-    | filters.voice
-    | filters.video_note
-    | filters.sticker
-    | filters.animation
+    pyro_filters.photo
+    | pyro_filters.video
+    | pyro_filters.document
+    | pyro_filters.audio
+    | pyro_filters.voice
+    | pyro_filters.video_note
+    | pyro_filters.sticker
+    | pyro_filters.animation
 )
 
-# ── Medya sil ─────────────────────────────────────────────────────────────
-@app.on_message(filters.group & media_filter)
-async def delete_media(client: Client, message: Message):
+@pyro.on_message(pyro_filters.group & media_filter)
+async def delete_media(client: Client, message: PyroMessage):
     if not cache_ready:
         return
 
@@ -153,30 +157,49 @@ async def delete_media(client: Client, message: Message):
     if not c_is_locked(cid):
         return
 
-    # Göndərənin ID-sini tap
     uid = None
     if message.from_user:
         uid = str(message.from_user.id)
     elif message.sender_chat:
         uid = f"chat_{message.sender_chat.id}"
 
-    # İstisnadakıları keç
     if uid and c_is_exempt(cid, uid):
         return
 
-    # Sil — Pyrogram user account olduğu üçün admin botları da silinir
     try:
         await message.delete()
     except Exception as e:
         logger.warning(f"Silme hatası: {e}")
 
-# ── /lock ─────────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("lock"))
-async def cmd_lock(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    cid = str(message.chat.id)
+# ── python-telegram-bot — komutlar üçün ──────────────────────────────────
+
+def ensure_group(func):
+    async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+        if update.effective_chat.type == "private":
+            await update.message.reply_text("🚫 Bu komut sadece gruplarda çalışır!" + DEV)
+            return
+        return await func(update, ctx)
+    return wrapper
+
+async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 Merhaba!\n\n"
+        "🔒 Ben bir *medya kilit botuyum*.\n\n"
+        "📌 Komutlar:\n"
+        "• `/lock` — Medya paylaşımını kapatır\n"
+        "• `/unlock` — Medya paylaşımını açar\n"
+        "• `/exempt` — Kişiyi istisnaya ekler\n"
+        "• `/unexempt` — Kişiyi istisnadan çıkarır\n"
+        "• `/list` — Yetkililer ve istisnalar listesi" + DEV,
+        parse_mode="Markdown"
+    )
+
+@ensure_group
+async def cmd_lock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
     if uid != FOUNDER_ID and not c_is_pro(cid, uid):
-        await message.reply("🚫 Yetkin yok!" + DEV)
+        await update.message.reply_text("🚫 Yetkin yok!" + DEV)
         return
     with get_conn() as conn:
         with conn.cursor() as cur:
@@ -184,36 +207,33 @@ async def cmd_lock(client: Client, message: Message):
                 "INSERT INTO locked_chats (chat_id) VALUES (%s) ON CONFLICT DO NOTHING", (cid,)
             )
     cache_locked.add(cid)
-    await message.reply("✅ Medya paylaşımı kapatıldı!" + DEV)
+    await update.message.reply_text("✅ Medya paylaşımı kapatıldı!" + DEV)
 
-# ── /unlock ───────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("unlock"))
-async def cmd_unlock(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    cid = str(message.chat.id)
+@ensure_group
+async def cmd_unlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
     if uid != FOUNDER_ID and not c_is_pro(cid, uid):
-        await message.reply("🚫 Yetkin yok!" + DEV)
+        await update.message.reply_text("🚫 Yetkin yok!" + DEV)
         return
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM locked_chats WHERE chat_id=%s", (cid,))
     cache_locked.discard(cid)
-    await message.reply("✅ Medya paylaşımı açıldı!" + DEV)
+    await update.message.reply_text("✅ Medya paylaşımı açıldı!" + DEV)
 
-# ── /pro ──────────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("pro"))
-async def cmd_pro(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    if uid != FOUNDER_ID:
-        await message.reply("🚫 Yetkin yok!" + DEV)
+@ensure_group
+async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if update.effective_user.id != FOUNDER_ID:
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
-    if not message.reply_to_message:
-        await message.reply("❗ Kullanım: Birine yanıt verip `/pro` yaz." + DEV)
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/pro` yaz." + DEV, parse_mode="Markdown")
         return
-    target = message.reply_to_message.from_user
-    cid    = str(message.chat.id)
-    tid    = str(target.id)
-    name   = get_name(target)
+    target = msg.reply_to_message.from_user
+    cid, tid = str(update.effective_chat.id), str(target.id)
+    name = get_name(target)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -223,43 +243,41 @@ async def cmd_pro(client: Client, message: Message):
             )
     cache_pro.add((cid, tid))
     cache_pro_names[(cid, tid)] = name
-    await message.reply(f"✅ **{name}** yetki aldı!" + DEV)
+    await msg.reply_text(f"✅ *{name}* yetki aldı!" + DEV, parse_mode="Markdown")
 
-# ── /unpro ────────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("unpro"))
-async def cmd_unpro(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    if uid != FOUNDER_ID:
-        await message.reply("🚫 Yetkin yok!" + DEV)
+@ensure_group
+async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if update.effective_user.id != FOUNDER_ID:
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
-    if not message.reply_to_message:
-        await message.reply("❗ Kullanım: Birine yanıt verip `/unpro` yaz." + DEV)
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unpro` yaz." + DEV, parse_mode="Markdown")
         return
-    target = message.reply_to_message.from_user
-    cid    = str(message.chat.id)
-    tid    = str(target.id)
-    name   = get_name(target)
+    target = msg.reply_to_message.from_user
+    cid, tid = str(update.effective_chat.id), str(target.id)
+    name = get_name(target)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM pro_users WHERE chat_id=%s AND user_id=%s", (cid, tid))
     cache_pro.discard((cid, tid))
     cache_pro_names.pop((cid, tid), None)
-    await message.reply(f"❌ **{name}** yetkisi alındı." + DEV)
+    await msg.reply_text(f"❌ *{name}* yetkisi alındı." + DEV, parse_mode="Markdown")
 
-# ── /exempt ───────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("exempt"))
-async def cmd_exempt(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    cid = str(message.chat.id)
+@ensure_group
+async def cmd_exempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
     if uid != FOUNDER_ID and not c_is_pro(cid, uid):
-        await message.reply("🚫 Yetkin yok!" + DEV)
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
-    if not message.reply_to_message:
-        await message.reply("❗ Kullanım: Birine yanıt verip `/exempt` yaz." + DEV)
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/exempt` yaz." + DEV, parse_mode="Markdown")
         return
-    target = message.reply_to_message.from_user
-    tid    = str(target.id)
-    name   = get_name(target)
+    target = msg.reply_to_message.from_user
+    tid  = str(target.id)
+    name = get_name(target)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -269,22 +287,22 @@ async def cmd_exempt(client: Client, message: Message):
             )
     cache_exempt.add((cid, tid))
     cache_exempt_names[(cid, tid)] = name
-    await message.reply(f"✅ **{name}** istisna listesine eklendi!" + DEV)
+    await msg.reply_text(f"✅ *{name}* istisna listesine eklendi!" + DEV, parse_mode="Markdown")
 
-# ── /unexempt ─────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("unexempt"))
-async def cmd_unexempt(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    cid = str(message.chat.id)
+@ensure_group
+async def cmd_unexempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
     if uid != FOUNDER_ID and not c_is_pro(cid, uid):
-        await message.reply("🚫 Yetkin yok!" + DEV)
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
-    if not message.reply_to_message:
-        await message.reply("❗ Kullanım: Birine yanıt verip `/unexempt` yaz." + DEV)
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/unexempt` yaz." + DEV, parse_mode="Markdown")
         return
-    target = message.reply_to_message.from_user
-    tid    = str(target.id)
-    name   = get_name(target)
+    target = msg.reply_to_message.from_user
+    tid  = str(target.id)
+    name = get_name(target)
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -292,15 +310,14 @@ async def cmd_unexempt(client: Client, message: Message):
             )
     cache_exempt.discard((cid, tid))
     cache_exempt_names.pop((cid, tid), None)
-    await message.reply(f"❌ **{name}** istisna listesinden çıkarıldı." + DEV)
+    await msg.reply_text(f"❌ *{name}* istisna listesinden çıkarıldı." + DEV, parse_mode="Markdown")
 
-# ── /list ─────────────────────────────────────────────────────────────────
-@app.on_message(filters.group & filters.command("list"))
-async def cmd_list(client: Client, message: Message):
-    uid = message.from_user.id if message.from_user else None
-    cid = str(message.chat.id)
+@ensure_group
+async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    cid = str(update.effective_chat.id)
     if uid != FOUNDER_ID and not c_is_pro(cid, uid):
-        await message.reply("🚫 Yetkin yok!" + DEV)
+        await update.message.reply_text("🚫 Yetkin yok!" + DEV)
         return
 
     pro_list = [
@@ -313,28 +330,69 @@ async def cmd_list(client: Client, message: Message):
     ]
 
     durum = "🔒 Kapalı" if c_is_locked(cid) else "🔓 Açık"
-
-    text  = "📋 **Grup Listesi**\n"
+    text  = "📋 *Grup Listesi*\n"
     text += "━━━━━━━━━━━━━━━\n"
     text += f"📡 Medya Durumu: {durum}\n\n"
-    text += f"👑 **Yetkili Kullanıcılar** ({len(pro_list)} kişi)\n"
+    text += f"👑 *Yetkili Kullanıcılar* ({len(pro_list)} kişi)\n"
     if pro_list:
         for name in pro_list:
             text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
-    text += f"\n🛡 **İstisna Listesi** ({len(exempt_list)} kişi)\n"
+    text += f"\n🛡 *İstisna Listesi* ({len(exempt_list)} kişi)\n"
     if exempt_list:
         for name in exempt_list:
             text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
     text += DEV
-    await message.reply(text)
+    await update.message.reply_text(text, parse_mode="Markdown")
 
-# ── Başlat ────────────────────────────────────────────────────────────────
-if __name__ == "__main__":
+# ── post_init ─────────────────────────────────────────────────────────────
+async def post_init(tg_app: Application):
     init_db()
     load_cache()
-    print("Bot başladı...")
-    app.run()
+    await tg_app.bot.set_my_commands([
+        BotCommand("start",    "Botu başlat"),
+        BotCommand("lock",     "Medya paylaşımını kapat"),
+        BotCommand("unlock",   "Medya paylaşımını aç"),
+        BotCommand("pro",      "Kullanıcıya yetki ver"),
+        BotCommand("unpro",    "Kullanıcının yetkisini al"),
+        BotCommand("exempt",   "Kişiyi istisnaya ekle"),
+        BotCommand("unexempt", "Kişiyi istisnadan çıkar"),
+        BotCommand("list",     "Yetkililer ve istisnalar listesi"),
+    ])
+
+# ── Başlat — hər ikisi eyni vaxtda işləsin ───────────────────────────────
+async def main():
+    # Telegram bot
+    tg_app = Application.builder().token(BOT_TOKEN).post_init(post_init).build()
+    tg_app.add_handler(CommandHandler("start",    cmd_start))
+    tg_app.add_handler(CommandHandler("lock",     cmd_lock))
+    tg_app.add_handler(CommandHandler("unlock",   cmd_unlock))
+    tg_app.add_handler(CommandHandler("pro",      cmd_pro))
+    tg_app.add_handler(CommandHandler("unpro",    cmd_unpro))
+    tg_app.add_handler(CommandHandler("exempt",   cmd_exempt))
+    tg_app.add_handler(CommandHandler("unexempt", cmd_unexempt))
+    tg_app.add_handler(CommandHandler("list",     cmd_list))
+
+    # Hər ikisini eyni vaxtda başlat
+    await tg_app.initialize()
+    await tg_app.start()
+    await tg_app.updater.start_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+
+    await pyro.start()
+
+    print("Bot başladı!")
+
+    # Dayanmadan işlə
+    try:
+        await asyncio.Event().wait()
+    finally:
+        await pyro.stop()
+        await tg_app.updater.stop()
+        await tg_app.stop()
+        await tg_app.shutdown()
+
+if __name__ == "__main__":
+    asyncio.run(main())
