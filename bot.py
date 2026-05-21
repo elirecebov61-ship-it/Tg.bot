@@ -1,6 +1,9 @@
+
 import logging
 import os
 import time
+import asyncio
+from collections import defaultdict
 from psycopg2 import pool
 from telegram import Update, BotCommand
 from telegram.ext import (
@@ -23,6 +26,29 @@ cache_pro          = set()
 cache_ready        = False
 cache_pro_names    = {}
 cache_exempt_names = {}
+
+# ── Silmə sırası — hamısını sırayla sil, heç biri qalmasın ───────────────
+_delete_queue: asyncio.Queue = None
+
+async def delete_worker():
+    """Arxa planda işləyir, sıradakı bütün mesajları silir."""
+    while True:
+        msg = await _delete_queue.get()
+        try:
+            await msg.delete()
+        except Exception as e:
+            logger.warning(f"Silme hatası: {e}")
+        finally:
+            _delete_queue.task_done()
+        await asyncio.sleep(0.03)  # Telegram limitinə düşməmək üçün
+
+def queue_delete(msg):
+    """Mesajı silmə sırasına əlavə et."""
+    try:
+        _delete_queue.put_nowait(msg)
+    except asyncio.QueueFull:
+        logger.warning("Delete queue dolu, asyncio.create_task ilə siliniyor")
+        asyncio.create_task(msg.delete())
 
 db_pool = None
 
@@ -163,7 +189,8 @@ async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO pro_users (chat_id, user_id, name) VALUES (%s,%s,%s) ON CONFLICT (chat_id, user_id) DO UPDATE SET name=%s",
+                "INSERT INTO pro_users (chat_id, user_id, name) VALUES (%s,%s,%s) "
+                "ON CONFLICT (chat_id, user_id) DO UPDATE SET name=%s",
                 (cid, tid, name, name)
             )
     cache_pro.add((cid, tid))
@@ -206,7 +233,8 @@ async def cmd_exempt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute(
-                "INSERT INTO exempt_users (chat_id, user_id, name) VALUES (%s,%s,%s) ON CONFLICT (chat_id, user_id) DO UPDATE SET name=%s",
+                "INSERT INTO exempt_users (chat_id, user_id, name) VALUES (%s,%s,%s) "
+                "ON CONFLICT (chat_id, user_id) DO UPDATE SET name=%s",
                 (cid, tid, name, name)
             )
     cache_exempt.add((cid, tid))
@@ -274,12 +302,12 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     pro_list = [
-        cache_pro_names.get((cid, uid), f"ID: {uid}")
-        for (c, uid) in cache_pro if c == cid
+        cache_pro_names.get((cid, u), f"ID: {u}")
+        for (c, u) in cache_pro if c == cid
     ]
     exempt_list = [
-        cache_exempt_names.get((cid, uid), f"ID: {uid}")
-        for (c, uid) in cache_exempt if c == cid
+        cache_exempt_names.get((cid, u), f"ID: {u}")
+        for (c, u) in cache_exempt if c == cid
     ]
 
     durum = "🔒 Kapalı" if c_is_locked(cid) else "🔓 Açık"
@@ -287,21 +315,18 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text  = "📋 *Grup Listesi*\n"
     text += "━━━━━━━━━━━━━━━\n"
     text += f"📡 Medya Durumu: {durum}\n\n"
-
     text += f"👑 *Yetkili Kullanıcılar* ({len(pro_list)} kişi)\n"
     if pro_list:
         for name in pro_list:
             text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
-
     text += f"\n🛡 *İstisna Listesi* ({len(exempt_list)} kişi)\n"
     if exempt_list:
         for name in exempt_list:
             text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
-
     text += DEV
     await msg.reply_text(text, parse_mode="Markdown")
 
@@ -313,19 +338,28 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     cid = str(update.effective_chat.id)
 
-    # Bot olsa da olmasa da uid al
-    if update.effective_user:
-        uid = str(update.effective_user.id)
-    else:
-        uid = "bot"
+    if not c_is_locked(cid):
+        return
 
-    if c_is_locked(cid) and not c_is_exempt(cid, uid):
-        try:
-            await update.message.delete()
-        except Exception as e:
-            logger.warning(f"Silme hatası: {e}")
+    user = update.effective_user
+
+    # Bot mesajını silmə — botlar da silinəcək (is_bot yoxlaması yoxdur)
+    # Yalnız istisnadakılar silinmir
+    if user is not None:
+        uid = str(user.id)
+        # İstisnadakı istifadəçiləri keç
+        if c_is_exempt(cid, uid):
+            return
+
+    # Hamısını sırasına əlavə et — bot da, istifadəçi də
+    queue_delete(update.message)
 
 async def post_init(app: Application):
+    global _delete_queue
+    _delete_queue = asyncio.Queue(maxsize=5000)
+    # Arxa planda silmə işçisini başlat
+    asyncio.create_task(delete_worker())
+
     init_db()
     load_cache()
 
@@ -389,7 +423,7 @@ def main():
     app.add_handler(MessageHandler(media_filter, delete_media))
 
     print("Bot başladı...")
-    app.run_polling(drop_pending_updates=True)
+    app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
     main()
