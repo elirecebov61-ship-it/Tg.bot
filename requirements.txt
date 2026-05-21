@@ -1,2 +1,3 @@
+pyrogram==2.0.106
+tgcrypto
 psycopg2-binary
-python-telegram-bot
