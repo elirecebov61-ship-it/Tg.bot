@@ -141,15 +141,15 @@ async def delete_media(client: Client, message: PyroMessage):
     if not cache_ready:
         return
 
-    # Mesajın media olub olmadığını yoxlayırıq (botlardan gələnlər də daxil)
+    # Media yoxlaması (bot mesajlarını da əhatə edir)
     if not (message.media or message.photo or message.video or message.document or 
             message.audio or message.voice or message.video_note or message.sticker or 
             message.animation):
         return
 
-    cid = str(message.chat.id)
+    cid = message.chat.id
 
-    if not c_is_locked(cid):
+    if not c_is_locked(str(cid)):
         return
 
     uid = None
@@ -158,12 +158,12 @@ async def delete_media(client: Client, message: PyroMessage):
     elif message.sender_chat:
         uid = f"chat_{message.sender_chat.id}"
 
-    # İstisna siyahısında olanları silmir
-    if uid and c_is_exempt(cid, uid):
+    if uid and c_is_exempt(str(cid), uid):
         return
 
     try:
-        await message.delete()
+        # Xətanın qarşısını almaq üçün stabil metod
+        await client.delete_messages(chat_id=cid, message_ids=message.id)
     except Exception as e:
         logger.warning(f"Silme hatası: {e}")
 
@@ -364,7 +364,7 @@ async def main():
     tg_app.add_handler(CommandHandler("lock",     cmd_lock))
     tg_app.add_handler(CommandHandler("unlock",   cmd_unlock))
     tg_app.add_handler(CommandHandler("pro",      cmd_pro))
-    tg_app.add_handler(CommandHandler("unpro",   cmd_unpro))
+    tg_app.add_handler(CommandHandler("unpro",    cmd_unpro))
     tg_app.add_handler(CommandHandler("exempt",   cmd_exempt))
     tg_app.add_handler(CommandHandler("unexempt", cmd_unexempt))
     tg_app.add_handler(CommandHandler("list",     cmd_list))
