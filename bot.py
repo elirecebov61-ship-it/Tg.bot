@@ -121,7 +121,7 @@ def get_name(user) -> str:
 def ensure_group(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type == "private":
-            await update.message.reply_text("🚫 Bu komut sadece gruplarda çalışır!" + DEV)
+            await update.message.reply_text("🚫 Bu komet sadece gruplarda çalışır!" + DEV)
             return
         return await func(update, ctx)
     return wrapper
@@ -267,10 +267,11 @@ async def cmd_unlock(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @ensure_group
 async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if update.effective_user.id != FOUNDER_ID:
-        await msg.reply_text("🚫 Bu komutu sadece kurucu kullanabilir!" + DEV)
-        return
+    uid = update.effective_user.id
     cid = str(update.effective_chat.id)
+    if uid != FOUNDER_ID and not c_is_pro(cid, uid):
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
 
     pro_list = [
         cache_pro_names.get((cid, uid), f"ID: {uid}")
@@ -309,8 +310,15 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     if not cache_ready:
         return
+
     cid = str(update.effective_chat.id)
-    uid = str(update.effective_user.id)
+
+    # Bot olsa da olmasa da uid al
+    if update.effective_user:
+        uid = str(update.effective_user.id)
+    else:
+        uid = "bot"
+
     if c_is_locked(cid) and not c_is_exempt(cid, uid):
         try:
             await update.message.delete()
@@ -321,7 +329,6 @@ async def post_init(app: Application):
     init_db()
     load_cache()
 
-    # DB-deki köhnə yazıların adlarını Telegram-dan çək
     for (cid, uid) in list(cache_pro):
         if not cache_pro_names.get((cid, uid)) or cache_pro_names[(cid, uid)] == f"ID: {uid}":
             try:
