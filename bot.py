@@ -26,28 +26,7 @@ cache_ready        = False
 cache_pro_names    = {}
 cache_exempt_names = {}
 
-# ── Silmə sırası — hamısını sırayla sil, heç biri qalmasın ───────────────
-_delete_queue: asyncio.Queue = None
 
-async def delete_worker():
-    """Arxa planda işləyir, sıradakı bütün mesajları silir."""
-    while True:
-        msg = await _delete_queue.get()
-        try:
-            await msg.delete()
-        except Exception as e:
-            logger.warning(f"Silme hatası: {e}")
-        finally:
-            _delete_queue.task_done()
-        await asyncio.sleep(0.03)  # Telegram limitinə düşməmək üçün
-
-def queue_delete(msg):
-    """Mesajı silmə sırasına əlavə et."""
-    try:
-        _delete_queue.put_nowait(msg)
-    except asyncio.QueueFull:
-        logger.warning("Delete queue dolu, asyncio.create_task ilə siliniyor")
-        asyncio.create_task(msg.delete())
 
 db_pool = None
 
@@ -360,14 +339,15 @@ async def delete_media(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # Sil
-    queue_delete(msg)
+    try:
+        await ctx.bot.delete_message(
+            chat_id=msg.chat_id,
+            message_id=msg.message_id
+        )
+    except Exception as e:
+        logger.warning(f"Silme hatası: {e}")
 
 async def post_init(app: Application):
-    global _delete_queue
-    _delete_queue = asyncio.Queue(maxsize=5000)
-    # Arxa planda silmə işçisini başlat
-    asyncio.create_task(delete_worker())
-
     init_db()
     load_cache()
 
