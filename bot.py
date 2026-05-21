@@ -4,10 +4,10 @@ import time
 from psycopg2 import pool
 from pyrogram import Client, filters
 from pyrogram.types import Message
-from telegram import BotCommand
+from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler,
-    ContextTypes, Update
+    ContextTypes
 )
 
 logging.basicConfig(level=logging.INFO)
@@ -123,7 +123,7 @@ def get_name(user) -> str:
         name += " " + user.last_name
     return name.strip() or user.username or str(user.id)
 
-# ── Pyrogram client (mesaj silmə üçün) ──
+# ── Pyrogram ──
 pyro = Client(
     "media_guard",
     api_id=API_ID,
@@ -135,20 +135,12 @@ pyro = Client(
 async def delete_media_pyro(client, message: Message):
     if not cache_ready:
         return
-
     cid = str(message.chat.id)
     if not c_is_locked(cid):
         return
-
-    # Göndərən bot olsa uid="bot", insan olsa id-si
-    if message.from_user:
-        uid = str(message.from_user.id)
-    else:
-        uid = "bot"
-
+    uid = str(message.from_user.id) if message.from_user else "bot"
     if c_is_exempt(cid, uid):
         return
-
     media = (
         message.photo or
         message.video or
@@ -159,14 +151,13 @@ async def delete_media_pyro(client, message: Message):
         message.sticker or
         message.animation
     )
-
     if media:
         try:
             await message.delete()
         except Exception as e:
             logger.warning(f"Silme hatası: {e}")
 
-# ── python-telegram-bot (komutlar üçün) ──
+# ── Komutlar ──
 def ensure_group(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type == "private":
@@ -332,25 +323,21 @@ async def cmd_list(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ]
 
     durum = "🔒 Kapalı" if c_is_locked(cid) else "🔓 Açık"
-
     text  = "📋 *Grup Listesi*\n"
     text += "━━━━━━━━━━━━━━━\n"
     text += f"📡 Medya Durumu: {durum}\n\n"
-
     text += f"👑 *Yetkili Kullanıcılar* ({len(pro_list)} kişi)\n"
     if pro_list:
         for name in pro_list:
             text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
-
     text += f"\n🛡 *İstisna Listesi* ({len(exempt_list)} kişi)\n"
     if exempt_list:
         for name in exempt_list:
             text += f"  • {name}\n"
     else:
         text += "  _Henüz kimse yok_\n"
-
     text += DEV
     await msg.reply_text(text, parse_mode="Markdown")
 
@@ -399,7 +386,6 @@ async def post_init(app: Application):
         BotCommand("list",     "Yetkililer ve istisnalar listesi"),
     ])
 
-    # Pyrogram-ı başlat
     await pyro.start()
     print("Pyrogram başladı!")
 
