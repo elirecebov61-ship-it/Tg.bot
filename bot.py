@@ -5,7 +5,6 @@ import time
 from contextlib import contextmanager
 from psycopg2 import pool
 from pyrogram import Client
-from pyrogram.types import Message as PyroMessage
 from telegram import Update, BotCommand
 from telegram.ext import (
     Application, CommandHandler,
@@ -27,11 +26,12 @@ DEV = "\n\n🛠 Dev. @emektas"
 GROUP_IDS = [
     -1003800695214,
     -1003751175874,
+    -1003890872488,
 ]
 
-pro_users: dict[int, str] = {}
+pro_users:      dict[int, str] = {}
+pro_delegators: dict[int, str] = {}
 
-# ── DB ────────────────────────────────────────────────────────────────────
 db_pool = None
 
 def get_pool():
@@ -71,6 +71,10 @@ def init_db():
                     user_id TEXT PRIMARY KEY,
                     name    TEXT DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS pro_delegators (
+                    user_id TEXT PRIMARY KEY,
+                    name    TEXT DEFAULT ''
+                );
             """)
 
 def load_pro_users():
@@ -81,12 +85,20 @@ def load_pro_users():
             cur.execute("SELECT user_id, name FROM pro_users")
             for r in cur.fetchall():
                 pro_users[int(r[0])] = r[1] or ""
+
+            cur.execute("SELECT user_id, name FROM pro_delegators")
+            for r in cur.fetchall():
+                pro_delegators[int(r[0])] = r[1] or ""
+
     print(f"Pro kullanıcılar yüklendi: {len(pro_users)} kişi")
+    print(f"Pro yetkilendiriciler yüklendi: {len(pro_delegators)} kişi")
 
 def is_authorized(user_id: int) -> bool:
     return user_id == FOUNDER_ID or user_id in pro_users
 
-# ── Pyrogram ──────────────────────────────────────────────────────────────
+def can_give_pro(user_id: int) -> bool:
+    return user_id == FOUNDER_ID or user_id in pro_delegators
+
 pyro = Client(
     "post_guard",
     api_id=API_ID,
@@ -94,7 +106,6 @@ pyro = Client(
     session_string=SESSION_STRING
 )
 
-# ── Komutlar ──────────────────────────────────────────────────────────────
 def ensure_group(func):
     async def wrapper(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type == "private":
@@ -110,8 +121,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "📌 Komutlar:\n"
         "• `/sil` — Gruptaki tüm mesajları siler\n"
         "• `/sil <sayi>` — Son N mesajı siler\n"
-        "• `/pro` — Kullanıcıya yetki ver _(Kurucu)_\n"
-        "• `/unpro` — Kullanıcının yetkisini al _(Kurucu)_\n\n"
+        "• `/pro` — Kullanıcıya silme yetkisi ver\n"
+        "• `/unpro` — Kullanıcının silme yetkisini al\n"
+        "• `/yetki` — Kullanıcıya pro verme yetkisi ver _(Kurucu)_\n"
+        "• `/yetkial` — Kullanıcının pro verme yetkisini al _(Kurucu)_\n\n"
         "⚠️ Komutları sadece yetkili kişiler kullanabilir." + DEV,
         parse_mode="Markdown"
     )
@@ -119,7 +132,7 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 @ensure_group
 async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if update.effective_user.id != FOUNDER_ID:
+    if not can_give_pro(update.effective_user.id):
         await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
     if not msg.reply_to_message:
@@ -137,12 +150,12 @@ async def cmd_pro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "ON CONFLICT (user_id) DO UPDATE SET name=%s",
                     (str(tid), name, name)
                 )
-    await msg.reply_text(f"✅ *{name}* yetki aldı!" + DEV, parse_mode="Markdown")
+    await msg.reply_text(f"✅ *{name}* silme yetkisi aldı!" + DEV, parse_mode="Markdown")
 
 @ensure_group
 async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
-    if update.effective_user.id != FOUNDER_ID:
+    if not can_give_pro(update.effective_user.id):
         await msg.reply_text("🚫 Yetkin yok!" + DEV)
         return
     if not msg.reply_to_message:
@@ -156,7 +169,49 @@ async def cmd_unpro(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         with get_conn() as conn:
             with conn.cursor() as cur:
                 cur.execute("DELETE FROM pro_users WHERE user_id=%s", (str(tid),))
-    await msg.reply_text(f"❌ *{name}* yetkisi alındı." + DEV, parse_mode="Markdown")
+    await msg.reply_text(f"❌ *{name}* silme yetkisi alındı." + DEV, parse_mode="Markdown")
+
+@ensure_group
+async def cmd_yetki(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if update.effective_user.id != FOUNDER_ID:
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/yetki` yaz." + DEV, parse_mode="Markdown")
+        return
+    target = msg.reply_to_message.from_user
+    tid  = target.id
+    name = target.first_name or str(tid)
+    pro_delegators[tid] = name
+    if DATABASE_URL:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "INSERT INTO pro_delegators (user_id, name) VALUES (%s,%s) "
+                    "ON CONFLICT (user_id) DO UPDATE SET name=%s",
+                    (str(tid), name, name)
+                )
+    await msg.reply_text(f"✅ *{name}* artık başkalarına pro yetkisi verebilir!" + DEV, parse_mode="Markdown")
+
+@ensure_group
+async def cmd_yetkial(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if update.effective_user.id != FOUNDER_ID:
+        await msg.reply_text("🚫 Yetkin yok!" + DEV)
+        return
+    if not msg.reply_to_message:
+        await msg.reply_text("❗ Kullanım: Birine yanıt verip `/yetkial` yaz." + DEV, parse_mode="Markdown")
+        return
+    target = msg.reply_to_message.from_user
+    tid  = target.id
+    name = target.first_name or str(tid)
+    pro_delegators.pop(tid, None)
+    if DATABASE_URL:
+        with get_conn() as conn:
+            with conn.cursor() as cur:
+                cur.execute("DELETE FROM pro_delegators WHERE user_id=%s", (str(tid),))
+    await msg.reply_text(f"❌ *{name}* pro verme yetkisi alındı." + DEV, parse_mode="Markdown")
 
 @ensure_group
 async def cmd_sil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -165,8 +220,8 @@ async def cmd_sil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     cid = update.effective_chat.id
-
     limit = 0
+
     if ctx.args and len(ctx.args) > 0:
         try:
             limit = int(ctx.args[0])
@@ -233,7 +288,6 @@ async def cmd_sil(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     asyncio.create_task(do_delete())
 
-# ── post_init ─────────────────────────────────────────────────────────────
 async def post_init(tg_app: Application):
     init_db()
     load_pro_users()
@@ -252,10 +306,12 @@ async def post_init(tg_app: Application):
             print(f"Qrup yüklənə bilmədi {gid}: {e}")
 
     await tg_app.bot.set_my_commands([
-        BotCommand("start", "Botu başlat"),
-        BotCommand("sil",   "Mesajları sil"),
-        BotCommand("pro",   "Kullanıcıya yetki ver"),
-        BotCommand("unpro", "Kullanıcının yetkisini al"),
+        BotCommand("start",    "Botu başlat"),
+        BotCommand("sil",      "Mesajları sil"),
+        BotCommand("pro",      "Silme yetkisi ver"),
+        BotCommand("unpro",    "Silme yetkisini al"),
+        BotCommand("yetki",    "Pro verme yetkisi ver"),
+        BotCommand("yetkial",  "Pro verme yetkisini al"),
     ])
 
 async def post_shutdown(tg_app: Application):
@@ -272,10 +328,12 @@ def main():
         .post_shutdown(post_shutdown)
         .build()
     )
-    tg_app.add_handler(CommandHandler("start",  cmd_start))
-    tg_app.add_handler(CommandHandler("sil",    cmd_sil))
-    tg_app.add_handler(CommandHandler("pro",    cmd_pro))
-    tg_app.add_handler(CommandHandler("unpro",  cmd_unpro))
+    tg_app.add_handler(CommandHandler("start",   cmd_start))
+    tg_app.add_handler(CommandHandler("sil",     cmd_sil))
+    tg_app.add_handler(CommandHandler("pro",     cmd_pro))
+    tg_app.add_handler(CommandHandler("unpro",   cmd_unpro))
+    tg_app.add_handler(CommandHandler("yetki",   cmd_yetki))
+    tg_app.add_handler(CommandHandler("yetkial", cmd_yetkial))
 
     print("Bot başladı...")
     tg_app.run_polling(
@@ -285,4 +343,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
