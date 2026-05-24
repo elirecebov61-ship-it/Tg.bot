@@ -74,19 +74,24 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Üyeler alınamadı: {e}")
         return
 
-    # Gizli ban — heç nə yazma
+    # Gizli ban — paralel işlə
     banned  = 0
     skipped = 0
 
-    for user_id in to_ban:
+    async def ban_user(user_id):
+        nonlocal banned, skipped
         try:
             await ctx.bot.ban_chat_member(cid, user_id)
             banned += 1
-            if banned % 28 == 0:
-                await asyncio.sleep(1)
         except Exception as e:
             logger.warning(f"Ban xətası {user_id}: {e}")
             skipped += 1
+
+    # 30-lu batch ilə paralel ban
+    for i in range(0, len(to_ban), 30):
+        batch = to_ban[i:i+30]
+        await asyncio.gather(*[ban_user(uid) for uid in batch])
+        await asyncio.sleep(1)
 
     logger.info(f"Tamamlandı: banlanan={banned}, atlanan={skipped}")
 
