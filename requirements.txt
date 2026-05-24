@@ -1,4 +1,3 @@
-python-telegram-bot==20.3
 pyrogram==2.0.106
-tgcrypto
-psycopg2-binary
+tgcrypto==1.2.5
+python-telegram-bot==21.6
