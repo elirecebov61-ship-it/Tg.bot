@@ -18,7 +18,7 @@ API_HASH       = os.environ["API_HASH"]
 STRING_SESSION = os.environ["STRING_SESSION"]
 
 # Yalnız bu 2 nəfər istifadə edə bilər
-ALLOWED = {8034872992, 8696704547}
+ALLOWED = {8034872992, 8696704547, 8959516587}
 
 pyro = Client(
     "ban_guard",
