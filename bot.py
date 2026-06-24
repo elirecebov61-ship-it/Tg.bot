@@ -2,7 +2,6 @@ import logging
 import os
 import asyncio
 from pyrogram import Client
-from pyrogram.enums import ChatMembersFilter
 from telegram import Update
 from telegram.ext import (
     Application, MessageHandler,
@@ -12,26 +11,51 @@ from telegram.ext import (
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-TOKEN          = os.environ["BOT_TOKEN"]
-API_ID         = int(os.environ["API_ID"])
-API_HASH       = os.environ["API_HASH"]
-STRING_SESSION = os.environ["STRING_SESSION"]
+TOKEN    = os.environ["BOT_TOKEN"]
+API_ID   = int(os.environ["API_ID"])
+API_HASH = os.environ["API_HASH"]
 
-# Yalnız bu 2 nəfər istifadə edə bilər
+SESSION_1 = os.environ["SESSION_1"]
+SESSION_2 = os.environ["SESSION_2"]
+SESSION_3 = os.environ["SESSION_3"]
+
 ALLOWED = {8034872992, 8793739928}
 
-pyro = Client(
-    "ban_guard",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=STRING_SESSION,
-    sleep_threshold=60,
-)
+clients = [
+    Client("ban_guard_1", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_1, sleep_threshold=60),
+    Client("ban_guard_2", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_2, sleep_threshold=60),
+    Client("ban_guard_3", api_id=API_ID, api_hash=API_HASH, session_string=SESSION_3, sleep_threshold=60),
+]
+
+async def ban_chunk(pyro: Client, cid: int, user_ids: list):
+    banned = 0
+    skipped = 0
+    for i in range(0, len(user_ids), 150):
+        batch = user_ids[i:i+150]
+        async def ban_one(uid, p=pyro):
+            nonlocal banned, skipped
+            try:
+                await p.ban_chat_member(cid, uid)
+                banned += 1
+            except Exception as e:
+                err = str(e)
+                if "FLOOD_WAIT" in err:
+                    wait = int(''.join(filter(str.isdigit, err)) or 5)
+                    logger.warning(f"FloodWait {wait}s — {p.name}")
+                    await asyncio.sleep(wait)
+                    try:
+                        await p.ban_chat_member(cid, uid)
+                        banned += 1
+                    except Exception:
+                        skipped += 1
+                else:
+                    skipped += 1
+        await asyncio.gather(*[ban_one(uid) for uid in batch])
+        await asyncio.sleep(1)
+    logger.info(f"{pyro.name}: banlanan={banned}, atlanan={skipped}")
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user:
-        return
-    if update.effective_chat.type == "private":
         return
 
     msg  = update.message
@@ -41,11 +65,19 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text.startswith("/sik"):
         return
 
-    # Yalnız icazəli 2 nəfər
     if uid not in ALLOWED:
         return
 
-    cid = update.effective_chat.id
+    parts = text.split()
+    if len(parts) < 2:
+        await msg.reply_text("❗ İstifadə: /sik -100xxxxxxxxxx")
+        return
+
+    try:
+        cid = int(parts[1])
+    except ValueError:
+        await msg.reply_text("❗ Qrup ID düzgün deyil!")
+        return
 
     # Adminləri al
     admins = set()
@@ -56,10 +88,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Admin siyahısı alınamadı: {e}")
 
-    # Pyrogram ilə üzv siyahısını al
+    # Üzv siyahısını al
     to_ban = []
     try:
-        async for member in pyro.get_chat_members(cid):
+        async for member in clients[0].get_chat_members(cid):
             user = member.user
             if user is None:
                 continue
@@ -71,40 +103,40 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
             to_ban.append(user.id)
     except Exception as e:
-        logger.warning(f"Üyeler alınamadı: {e}")
+        logger.warning(f"Üzvlər alınamadı: {e}")
         return
 
-    # Gizli ban — paralel işlə
-    banned  = 0
-    skipped = 0
+    total = len(to_ban)
+    await msg.reply_text(f"🚀 {total} nəfər banlanır...")
 
-    async def ban_user(user_id):
-        nonlocal banned, skipped
-        try:
-            await ctx.bot.ban_chat_member(cid, user_id)
-            banned += 1
-        except Exception as e:
-            logger.warning(f"Ban xətası {user_id}: {e}")
-            skipped += 1
+    # Siyahını 3 hissəyə böl
+    chunk = (total + 2) // 3
+    chunks = [
+        to_ban[0*chunk:1*chunk],
+        to_ban[1*chunk:2*chunk],
+        to_ban[2*chunk:],
+    ]
 
-    # 30-lu batch ilə paralel ban
-    for i in range(0, len(to_ban), 30):
-        batch = to_ban[i:i+30]
-        await asyncio.gather(*[ban_user(uid) for uid in batch])
-        await asyncio.sleep(1)
+    # 3 hesab paralel işləsin
+    await asyncio.gather(*[
+        ban_chunk(clients[i], cid, chunks[i])
+        for i in range(3)
+    ])
 
-    logger.info(f"Tamamlandı: banlanan={banned}, atlanan={skipped}")
+    await msg.reply_text(f"✅ Tamamlandı! {total} nəfər banlandı.")
 
 async def post_init(tg_app: Application):
-    await pyro.start()
-    print("Pyrogram başladı!")
+    for c in clients:
+        await c.start()
+    print("Bütün Pyrogram clientlər başladı!")
     await tg_app.bot.set_my_commands([])
 
 async def post_shutdown(tg_app: Application):
-    try:
-        await pyro.stop()
-    except Exception:
-        pass
+    for c in clients:
+        try:
+            await c.stop()
+        except Exception:
+            pass
 
 def main():
     tg_app = (
@@ -122,3 +154,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
