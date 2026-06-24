@@ -2,7 +2,7 @@
 nixPkgs = ["python311"]
 
 [phases.install]
-cmds = ["pip install pyrogram tgcrypto python-telegram-bot"]
+cmds = ["pip install pyrogram tgcrypto python-telegram-bot psycopg2-binary"]
 
 [start]
 cmd = "python bot.py"
