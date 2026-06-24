@@ -1,3 +1,4 @@
 database.db
 .bash_history
 *.log
+*.session
