@@ -1,3 +1,4 @@
-pyrogram==2.0.106
-tgcrypto==1.2.5
-python-telegram-bot==21.3
+pyrogram
+tgcrypto
+python-telegram-bot
+asyncio
