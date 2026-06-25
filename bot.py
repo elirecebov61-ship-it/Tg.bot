@@ -2,6 +2,7 @@ import logging
 import os
 import asyncio
 from pyrogram import Client
+from pyrogram.enums import ChatMembersFilter
 from telegram import Update
 from telegram.ext import (
     Application, MessageHandler,
@@ -16,6 +17,7 @@ API_ID         = int(os.environ["API_ID"])
 API_HASH       = os.environ["API_HASH"]
 STRING_SESSION = os.environ["STRING_SESSION"]
 
+# Yalnız bu 2 nəfər istifadə edə bilər
 ALLOWED = {8034872992, 8793739928}
 
 pyro = Client(
@@ -39,11 +41,13 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text.startswith("/sik"):
         return
 
+    # Yalnız icazəli 2 nəfər
     if uid not in ALLOWED:
         return
 
     cid = update.effective_chat.id
 
+    # Adminləri al
     admins = set()
     try:
         admins_list = await ctx.bot.get_chat_administrators(cid)
@@ -52,6 +56,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Admin siyahısı alınamadı: {e}")
 
+    # Pyrogram ilə üzv siyahısını al
     to_ban = []
     try:
         async for member in pyro.get_chat_members(cid):
@@ -66,12 +71,10 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
             to_ban.append(user.id)
     except Exception as e:
-        logger.warning(f"Üzvlər alınamadı: {e}")
+        logger.warning(f"Üyeler alınamadı: {e}")
         return
 
-    total = len(to_ban)
-    await msg.reply_text(f"🚀 {total} kisi banlanır...")
-
+    # Gizli ban — paralel işlə
     banned  = 0
     skipped = 0
 
@@ -84,12 +87,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Ban xətası {user_id}: {e}")
             skipped += 1
 
-    for i in range(0, len(to_ban), 100):
-        batch = to_ban[i:i+100]
+    # 30-lu batch ilə paralel ban
+    for i in range(0, len(to_ban), 30):
+        batch = to_ban[i:i+30]
         await asyncio.gather(*[ban_user(uid) for uid in batch])
-        await asyncio.sleep(0.5)
+        await asyncio.sleep(1)
 
-    await msg.reply_text(f"✅ Tamamlandı! Banlanan={banned}, Atlanan={skipped}")
     logger.info(f"Tamamlandı: banlanan={banned}, atlanan={skipped}")
 
 async def post_init(tg_app: Application):
@@ -119,4 +122,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
