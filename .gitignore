@@ -1,6 +1,13 @@
-database.db
-.bash_history
-*.log
-*.session
-__pycache__/
+# Məxfi fayllar
 .env
+*.session
+*.session-journal
+
+# Python kesh faylları
+__pycache__/
+*.pyc
+
+# Digər
+.venv/
+venv/
+.pytest_cache/
