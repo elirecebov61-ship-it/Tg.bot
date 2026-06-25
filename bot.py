@@ -91,10 +91,11 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Ban xətası {user_id}: {e}")
             skipped += 1
 
+    # Saniyədə ~60 ban (təhlükəsiz maksimum)
     for i in range(0, len(to_ban), 30):
         batch = to_ban[i:i+30]
         await asyncio.gather(*[ban_user(uid) for uid in batch])
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
     logger.info(f"Tamamlandı: banlanan={banned}, atlanan={skipped}")
 
