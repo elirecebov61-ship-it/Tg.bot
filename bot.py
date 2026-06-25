@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 TOKEN          = os.environ["BOT_TOKEN"]
 API_ID         = int(os.environ["API_ID"])
 API_HASH       = os.environ["API_HASH"]
-SESSION_STRING = os.environ["SESSION_STRING"]
+STRING_SESSION = os.environ["STRING_SESSION"]
 
 ALLOWED = {8034872992, 8793739928}
 
@@ -22,34 +22,27 @@ pyro = Client(
     "ban_guard",
     api_id=API_ID,
     api_hash=API_HASH,
-    session_string=SESSION_STRING,
+    session_string=STRING_SESSION,
     sleep_threshold=60,
 )
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not update.message or not update.effective_user:
         return
+    if update.effective_chat.type == "private":
+        return
 
     msg  = update.message
     uid  = update.effective_user.id
     text = (msg.text or "").strip()
 
-    if not text.startswith("/sik1"):
+    if not text.startswith("/sik"):
         return
 
     if uid not in ALLOWED:
         return
 
-    parts = text.split()
-    if len(parts) < 2:
-        await msg.reply_text("❗ İstifadə: /sik1 -100xxxxxxxxxx")
-        return
-
-    try:
-        cid = int(parts[1])
-    except ValueError:
-        await msg.reply_text("❗ Qrup ID düzgün deyil!")
-        return
+    cid = update.effective_chat.id
 
     admins = set()
     try:
@@ -77,13 +70,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     total = len(to_ban)
-    # 1/3 hissəsi
-    chunk = (total + 2) // 3
-    my_part = to_ban[0:chunk]
+    await msg.reply_text(f"🚀 {total} nəfər banlanır...")
 
-    await msg.reply_text(f"🚀 Bot1: {len(my_part)} nəfər banlanır...")
-
-    banned = 0
+    banned  = 0
     skipped = 0
 
     async def ban_user(user_id):
@@ -92,18 +81,20 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.ban_chat_member(cid, user_id)
             banned += 1
         except Exception as e:
+            logger.warning(f"Ban xətası {user_id}: {e}")
             skipped += 1
 
-    for i in range(0, len(my_part), 50):
-        batch = my_part[i:i+50]
+    for i in range(0, len(to_ban), 100):
+        batch = to_ban[i:i+100]
         await asyncio.gather(*[ban_user(uid) for uid in batch])
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
-    await msg.reply_text(f"✅ Bot1 tamamlandı! {banned} banlandi, {skipped} atlandı.")
+    await msg.reply_text(f"✅ Tamamlandı! Banlanan={banned}, Atlanan={skipped}")
+    logger.info(f"Tamamlandı: banlanan={banned}, atlanan={skipped}")
 
 async def post_init(tg_app: Application):
     await pyro.start()
-    print("Bot1 Pyrogram başladı!")
+    print("Pyrogram başladı!")
     await tg_app.bot.set_my_commands([])
 
 async def post_shutdown(tg_app: Application):
@@ -123,7 +114,7 @@ def main():
     tg_app.add_handler(MessageHandler(filters.TEXT, handle_message))
     tg_app.add_handler(MessageHandler(filters.COMMAND, handle_message))
 
-    print("Bot1 başladı...")
+    print("Ban botu başladı...")
     tg_app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
 
 if __name__ == "__main__":
