@@ -1,8 +1,8 @@
 [phases.setup]
 nixPkgs = ["python311"]
 
-[phases.install]
-cmds = ["pip install pyrogram tgcrypto python-telegram-bot"]
+[phases.build]
+cmds = ["python -m pip install -r requirements.txt"]
 
 [start]
 cmd = "python bot.py"
