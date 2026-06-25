@@ -70,7 +70,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     total = len(to_ban)
-    await msg.reply_text(f"🚀 {total} nəfər banlanır...")
+    await msg.reply_text(f"🚀 {total} kisi banlanır...")
 
     banned  = 0
     skipped = 0
