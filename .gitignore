@@ -2,3 +2,5 @@ database.db
 .bash_history
 *.log
 *.session
+__pycache__/
+.env
