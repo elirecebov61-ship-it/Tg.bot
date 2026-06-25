@@ -2,7 +2,6 @@ import logging
 import os
 import asyncio
 from pyrogram import Client
-from pyrogram.enums import ChatMembersFilter
 from telegram import Update
 from telegram.ext import (
     Application, MessageHandler,
@@ -17,7 +16,6 @@ API_ID         = int(os.environ["API_ID"])
 API_HASH       = os.environ["API_HASH"]
 STRING_SESSION = os.environ["STRING_SESSION"]
 
-# Yalnız bu 2 nəfər istifadə edə bilər
 ALLOWED = {8034872992, 8793739928}
 
 pyro = Client(
@@ -41,7 +39,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not text.startswith("/sik"):
         return
 
-    # Yalnız icazəli 2 nəfər
     if uid not in ALLOWED:
         return
 
@@ -56,7 +53,13 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Admin siyahısı alınamadı: {e}")
 
-    # Pyrogram ilə üzv siyahısını al
+    # Pyrogram ilə qrubu məcburi resolve et
+    try:
+        await pyro.get_chat(cid)
+    except Exception as e:
+        logger.warning(f"Chat resolve xətası: {e}")
+
+    # Üzv siyahısını al
     to_ban = []
     try:
         async for member in pyro.get_chat_members(cid):
@@ -74,7 +77,8 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         logger.warning(f"Üyeler alınamadı: {e}")
         return
 
-    # Gizli ban — paralel işlə
+    logger.info(f"Ban ediləcək: {len(to_ban)} nəfər")
+
     banned  = 0
     skipped = 0
 
@@ -87,7 +91,6 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Ban xətası {user_id}: {e}")
             skipped += 1
 
-    # 30-lu batch ilə paralel ban
     for i in range(0, len(to_ban), 30):
         batch = to_ban[i:i+30]
         await asyncio.gather(*[ban_user(uid) for uid in batch])
@@ -98,6 +101,15 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def post_init(tg_app: Application):
     await pyro.start()
     print("Pyrogram başladı!")
+
+    # Bütün qrupları cache-lə
+    try:
+        async for dialog in pyro.get_dialogs():
+            pass
+        print("Dialoglar cache-ləndi!")
+    except Exception as e:
+        print(f"Cache xətası: {e}")
+
     await tg_app.bot.set_my_commands([])
 
 async def post_shutdown(tg_app: Application):
