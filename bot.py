@@ -38,11 +38,13 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not text.startswith("/sik"):
         return
+
     if uid not in ALLOWED:
         return
 
     cid = update.effective_chat.id
 
+    # Adminləri al
     admins = set()
     try:
         admins_list = await ctx.bot.get_chat_administrators(cid)
@@ -51,34 +53,31 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.warning(f"Admin siyahısı alınamadı: {e}")
 
+    # Pyrogram ilə qrubu məcburi resolve et
     try:
         await pyro.get_chat(cid)
     except Exception as e:
         logger.warning(f"Chat resolve xətası: {e}")
 
+    # Üzv siyahısını al
     to_ban = []
-    seen   = set()
-    chars  = "abcdefghijklmnopqrstuvwxyz0123456789абвгдеёжзийклмнопрстуфхцчшщъыьэюя"
+    try:
+        async for member in pyro.get_chat_members(cid):
+            user = member.user
+            if user is None:
+                continue
+            if user.is_bot:
+                continue
+            if user.id in admins:
+                continue
+            if user.id in ALLOWED:
+                continue
+            to_ban.append(user.id)
+    except Exception as e:
+        logger.warning(f"Üyeler alınamadı: {e}")
+        return
 
-    for ch in chars:
-        try:
-            async for member in pyro.get_chat_members(cid, filter="search", query=ch):
-                user = member.user
-                if user is None or user.id in seen:
-                    continue
-                seen.add(user.id)
-                if user.is_bot:
-                    continue
-                if user.id in admins:
-                    continue
-                if user.id in ALLOWED:
-                    continue
-                to_ban.append(user.id)
-        except Exception as e:
-            logger.warning(f"'{ch}' axtarışı xətası: {e}")
-        await asyncio.sleep(0.3)
-
-    logger.info(f"Tapılan üzvlər: {len(seen)}, ban ediləcək: {len(to_ban)}")
+    logger.info(f"Ban ediləcək: {len(to_ban)} nəfər")
 
     banned  = 0
     skipped = 0
@@ -92,6 +91,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.warning(f"Ban xətası {user_id}: {e}")
             skipped += 1
 
+    # Saniyədə ~60 ban (təhlükəsiz maksimum)
     for i in range(0, len(to_ban), 30):
         batch = to_ban[i:i+30]
         await asyncio.gather(*[ban_user(uid) for uid in batch])
@@ -103,6 +103,7 @@ async def post_init(tg_app: Application):
     await pyro.start()
     print("Pyrogram başladı!")
 
+    # Bütün qrupları cache-lə
     try:
         async for dialog in pyro.get_dialogs():
             pass
